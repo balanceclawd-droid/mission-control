@@ -64,9 +64,17 @@ let runtimeTokenCache: StoredToken | null = null;
 function readToken(): { token: StoredToken; source: "env" | "file" } {
   const envJson = process.env.GOOGLE_TASKS_TOKEN_JSON;
   if (envJson) {
+    // Be tolerant of accidental pasted wrapper text (e.g. terminal command/output).
+    const firstBrace = envJson.indexOf("{");
+    const lastBrace = envJson.lastIndexOf("}");
+    const candidate =
+      firstBrace >= 0 && lastBrace > firstBrace
+        ? envJson.slice(firstBrace, lastBrace + 1)
+        : envJson;
+
     // Cache parsed token for this runtime instance.
     if (!runtimeTokenCache) {
-      runtimeTokenCache = JSON.parse(envJson) as StoredToken;
+      runtimeTokenCache = JSON.parse(candidate) as StoredToken;
     }
     return { token: runtimeTokenCache, source: "env" };
   }
