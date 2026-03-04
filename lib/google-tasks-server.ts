@@ -1,7 +1,14 @@
 /**
  * Server-only Google Tasks client.
- * Uses token from ~/.openclaw/credentials/google-tasks-token.json.
- * Handles token refresh automatically and writes refreshed token back to disk.
+ *
+ * Credential resolution order:
+ * 1) GOOGLE_TASKS_TOKEN_JSON (hosted/runtime-safe, recommended for Vercel)
+ * 2) GOOGLE_TASKS_TOKEN_PATH (optional custom file path)
+ * 3) ~/.openclaw/credentials/google-tasks-token.json (local dev fallback)
+ *
+ * Handles token refresh automatically.
+ * - If loaded from JSON env, refreshed token stays in-memory for this runtime instance.
+ * - If loaded from file, refreshed token is persisted back to that file.
  *
  * NEVER import this file from client components — it uses `fs` (Node.js only).
  */
@@ -43,23 +50,47 @@ export interface GTask {
 
 // ─── Token helpers ────────────────────────────────────────────────────────────
 
-const TOKEN_PATH = path.join(
+const DEFAULT_TOKEN_PATH = path.join(
   process.env.HOME ?? "/root",
   ".openclaw/credentials/google-tasks-token.json"
 );
 
-function readToken(): StoredToken {
-  const raw = fs.readFileSync(TOKEN_PATH, "utf-8");
-  return JSON.parse(raw) as StoredToken;
+function getTokenPath(): string {
+  return process.env.GOOGLE_TASKS_TOKEN_PATH || DEFAULT_TOKEN_PATH;
 }
 
-function writeToken(token: StoredToken): void {
-  fs.writeFileSync(TOKEN_PATH, JSON.stringify(token, null, 2), "utf-8");
+let runtimeTokenCache: StoredToken | null = null;
+
+function readToken(): { token: StoredToken; source: "env" | "file" } {
+  const envJson = process.env.GOOGLE_TASKS_TOKEN_JSON;
+  if (envJson) {
+    // Cache parsed token for this runtime instance.
+    if (!runtimeTokenCache) {
+      runtimeTokenCache = JSON.parse(envJson) as StoredToken;
+    }
+    return { token: runtimeTokenCache, source: "env" };
+  }
+
+  const tokenPath = getTokenPath();
+  const raw = fs.readFileSync(tokenPath, "utf-8");
+  return { token: JSON.parse(raw) as StoredToken, source: "file" };
+}
+
+function writeToken(token: StoredToken, source: "env" | "file"): void {
+  if (source === "env") {
+    // In hosted/serverless envs we can't safely write to disk.
+    runtimeTokenCache = token;
+    return;
+  }
+
+  const tokenPath = getTokenPath();
+  fs.writeFileSync(tokenPath, JSON.stringify(token, null, 2), "utf-8");
 }
 
 /** Returns a valid access token, refreshing if needed (with 60s buffer). */
 export async function getAccessToken(): Promise<string> {
-  const stored = readToken();
+  const loaded = readToken();
+  const stored = loaded.token;
 
   const expiry = new Date(stored.expiry).getTime();
   const bufferMs = 60 * 1000;
@@ -100,7 +131,7 @@ export async function getAccessToken(): Promise<string> {
     expiry: newExpiry.toISOString(),
   };
 
-  writeToken(updated);
+  writeToken(updated, loaded.source);
   return updated.token;
 }
 
