@@ -1,35 +1,29 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { StatCard } from "@/components/ui/StatCard";
-import { Table, TableHead, TableHeader, TableBody, TableRow, TableCell } from "@/components/ui/Table";
-import { leads } from "@/lib/mock/leads";
+import {
+  Table,
+  TableHead,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableCell,
+} from "@/components/ui/Table";
+import { leads as mockLeads } from "@/lib/mock/leads";
 import type { LeadTemp, LeadStatus } from "@/lib/mock/leads";
+import type { MissionLead } from "@/lib/notion-leads";
 
-// Phase 1 extended fields — merged into leads for the command center view
-const leadMeta: Record<string, {
-  accountBlocked?: boolean;
-  accountHandle?: string;
-  awaitingApproval?: boolean;
-  overdueDays?: number; // days since last contact
-  segment?: "infra" | "exchange" | "founders" | "other";
-}> = {
-  l1: { accountHandle: "@ryan_clawd_li", awaitingApproval: false, overdueDays: 0, segment: "founders" },
-  l2: { accountHandle: "@ryan_clawd_li", awaitingApproval: false, overdueDays: 1, segment: "exchange" },
-  l3: { accountHandle: "@ryan_x", awaitingApproval: false, overdueDays: 2, segment: "founders" },
-  l4: { accountHandle: "@ryan_clawd_li", awaitingApproval: true, overdueDays: 3, segment: "infra" },
-  l5: { accountHandle: "@lester_tg", accountBlocked: false, awaitingApproval: false, overdueDays: 7, segment: "founders" },
-  l6: { accountHandle: "@enreach_account_1", accountBlocked: true, awaitingApproval: true, overdueDays: 4, segment: "exchange" },
-  l7: { accountHandle: "@ryan_clawd_li", awaitingApproval: true, overdueDays: 0, segment: "exchange" },
-  l8: { accountHandle: "@ryan_x", awaitingApproval: false, overdueDays: 14, segment: "founders" },
-  l9: { accountHandle: "@ryan_clawd_li", awaitingApproval: false, overdueDays: 1, segment: "infra" },
-  l10: { accountHandle: "@enreach_account_1", accountBlocked: true, awaitingApproval: false, overdueDays: 5, segment: "infra" },
-};
+type ViewTab =
+  | "all"
+  | "warm_hot"
+  | "awaiting_approval"
+  | "blocked_account"
+  | "overdue";
 
-type ViewTab = "all" | "warm_hot" | "awaiting_approval" | "blocked_account" | "overdue";
 const VIEW_TABS: Array<{ value: ViewTab; label: string }> = [
   { value: "all", label: "All Leads" },
   { value: "warm_hot", label: "Warm / Hot" },
@@ -39,60 +33,137 @@ const VIEW_TABS: Array<{ value: ViewTab; label: string }> = [
 ];
 
 const tempFilters: Array<LeadTemp | "all"> = ["all", "hot", "warm", "cold"];
-const statusFilters: Array<LeadStatus | "all"> = ["all", "new", "contacted", "replied", "meeting", "proposal"];
+const statusFilters: Array<LeadStatus | "all"> = [
+  "all",
+  "new",
+  "contacted",
+  "replied",
+  "meeting",
+  "proposal",
+];
 
 export default function LeadsPage() {
+  const [rows, setRows] = useState<MissionLead[]>([]);
+  const [source, setSource] = useState<"notion" | "mock" | "loading">("loading");
+  const [error, setError] = useState<string>("");
+
   const [view, setView] = useState<ViewTab>("all");
   const [tempFilter, setTempFilter] = useState<LeadTemp | "all">("all");
   const [statusFilter, setStatusFilter] = useState<LeadStatus | "all">("all");
 
-  const enriched = leads.map((l) => ({ ...l, ...leadMeta[l.id] }));
+  useEffect(() => {
+    let mounted = true;
 
-  const counts = useMemo(() => ({
-    warm: enriched.filter((l) => l.temp === "warm").length,
-    hot: enriched.filter((l) => l.temp === "hot").length,
-    blocked: enriched.filter((l) => l.accountBlocked).length,
-    overdue: enriched.filter((l) => (l.overdueDays ?? 0) >= 5).length,
-    awaitingApproval: enriched.filter((l) => l.awaitingApproval).length,
-  }), []);
+    (async () => {
+      try {
+        const res = await fetch("/api/leads", { cache: "no-store" });
+        const data = (await res.json()) as {
+          ok: boolean;
+          leads: MissionLead[];
+          error?: string;
+        };
+
+        if (!mounted) return;
+
+        if (res.ok && data.ok && data.leads?.length >= 0) {
+          setRows(data.leads);
+          setSource("notion");
+          setError("");
+          return;
+        }
+
+        setRows(mockLeads as unknown as MissionLead[]);
+        setSource("mock");
+        setError(data.error ?? "Failed to load live leads");
+      } catch (e) {
+        if (!mounted) return;
+        setRows(mockLeads as unknown as MissionLead[]);
+        setSource("mock");
+        setError(e instanceof Error ? e.message : "Failed to load live leads");
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const counts = useMemo(
+    () => ({
+      warm: rows.filter((l) => l.temp === "warm").length,
+      hot: rows.filter((l) => l.temp === "hot").length,
+      blocked: rows.filter((l) => l.accountBlocked).length,
+      overdue: rows.filter((l) => (l.overdueDays ?? 0) >= 5).length,
+      awaitingApproval: rows.filter((l) => l.awaitingApproval).length,
+    }),
+    [rows]
+  );
 
   const filtered = useMemo(() => {
-    let base = enriched;
+    let base = rows;
 
-    // Apply view filter
     if (view === "warm_hot") base = base.filter((l) => l.temp === "hot" || l.temp === "warm");
     else if (view === "awaiting_approval") base = base.filter((l) => l.awaitingApproval);
     else if (view === "blocked_account") base = base.filter((l) => l.accountBlocked);
     else if (view === "overdue") base = base.filter((l) => (l.overdueDays ?? 0) >= 5);
 
-    // Apply additional filters (only in "all" view)
     if (view === "all") {
       if (tempFilter !== "all") base = base.filter((l) => l.temp === tempFilter);
       if (statusFilter !== "all") base = base.filter((l) => l.status === statusFilter);
     }
 
     return base;
-  }, [view, tempFilter, statusFilter]);
+  }, [rows, view, tempFilter, statusFilter]);
 
-  const canSend = (lead: typeof enriched[0]) => !lead.accountBlocked && !lead.awaitingApproval;
+  const canSend = (lead: MissionLead) => !lead.accountBlocked && !lead.awaitingApproval;
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
       <div>
         <h1 className="text-lg font-semibold text-slate-100">Leads</h1>
-        <p className="text-xs text-slate-500 mt-0.5">Pipeline command center — contacts, outreach targets, and status</p>
+        <p className="text-xs text-slate-500 mt-0.5">
+          Pipeline command center — contacts, outreach targets, and status
+        </p>
       </div>
 
-      {/* Summary cards */}
+      {source === "loading" && (
+        <div className="text-xs text-slate-500">Loading live leads…</div>
+      )}
+
+      {source === "mock" && (
+        <div className="flex items-start gap-2 px-3 py-2 rounded border border-amber-500/30 bg-amber-500/10 text-amber-400 text-xs">
+          <span>⚠️</span>
+          <span>
+            Live data unavailable. Showing mock data.
+            {error ? ` (${error})` : ""}
+          </span>
+        </div>
+      )}
+
+      {source === "notion" && (
+        <div className="text-[11px] text-emerald-400/90">Live source: Notion</div>
+      )}
+
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3">
         <StatCard label="Hot" value={String(counts.hot)} trend="up" change={`${counts.hot} active`} />
         <StatCard label="Warm" value={String(counts.warm)} trend="neutral" />
-        <StatCard label="Blocked Account" value={String(counts.blocked)} trend={counts.blocked > 0 ? "warn" : "neutral"} />
-        <StatCard label="Overdue (5d+)" value={String(counts.overdue)} trend={counts.overdue > 0 ? "down" : "neutral"} />
-        <StatCard label="Awaiting Approval" value={String(counts.awaitingApproval)} trend={counts.awaitingApproval > 0 ? "warn" : "neutral"} />
+        <StatCard
+          label="Blocked Account"
+          value={String(counts.blocked)}
+          trend={counts.blocked > 0 ? "warn" : "neutral"}
+        />
+        <StatCard
+          label="Overdue (5d+)"
+          value={String(counts.overdue)}
+          trend={counts.overdue > 0 ? "down" : "neutral"}
+        />
+        <StatCard
+          label="Awaiting Approval"
+          value={String(counts.awaitingApproval)}
+          trend={counts.awaitingApproval > 0 ? "warn" : "neutral"}
+        />
       </div>
 
-      {/* View tabs */}
       <div className="flex gap-1.5 flex-wrap border-b border-slate-800 pb-3">
         {VIEW_TABS.map((tab) => (
           <button
@@ -109,7 +180,6 @@ export default function LeadsPage() {
         ))}
       </div>
 
-      {/* Additional filters — only in "all" view */}
       {view === "all" && (
         <div className="flex flex-col sm:flex-row gap-3">
           <div className="flex gap-1.5 flex-wrap">
@@ -147,21 +217,18 @@ export default function LeadsPage() {
         </div>
       )}
 
-      {/* Blocked account warning */}
       {view === "blocked_account" && counts.blocked > 0 && (
         <div className="flex items-start gap-3 px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/25 text-sm text-amber-400">
           <span>⚠️</span>
-          <span>These leads are on a blocked or rate-limited account. Resolve the account issue before any outreach.</span>
+          <span>
+            These leads are on a blocked or rate-limited account. Resolve the account issue before any outreach.
+          </span>
         </div>
       )}
 
-      {/* Table */}
       <Card padding="none">
         <div className="p-4 border-b border-slate-800">
-          <SectionHeader
-            title="Leads"
-            subtitle={`${filtered.length} of ${leads.length} shown`}
-          />
+          <SectionHeader title="Leads" subtitle={`${filtered.length} of ${rows.length} shown`} />
         </div>
         <div className="p-4">
           <Table>
@@ -178,9 +245,7 @@ export default function LeadsPage() {
             <TableBody>
               {filtered.length === 0 ? (
                 <TableRow>
-                  <TableCell className="text-center text-slate-500 py-8">
-                    No leads match this view
-                  </TableCell>
+                  <TableCell className="text-center text-slate-500 py-8">No leads match this view</TableCell>
                 </TableRow>
               ) : (
                 filtered.map((lead) => (
@@ -195,9 +260,7 @@ export default function LeadsPage() {
                         <div className="text-xs text-slate-500">{lead.role}</div>
                       </div>
                     </TableCell>
-                    <TableCell className="hidden sm:table-cell text-sm text-slate-400">
-                      {lead.company}
-                    </TableCell>
+                    <TableCell className="hidden sm:table-cell text-sm text-slate-400">{lead.company}</TableCell>
                     <TableCell className="hidden md:table-cell">
                       <div>
                         <span className="text-xs text-slate-400">{lead.channel}</span>
@@ -209,9 +272,7 @@ export default function LeadsPage() {
                     <TableCell>
                       <Badge variant={lead.status}>{lead.status}</Badge>
                     </TableCell>
-                    <TableCell className="hidden lg:table-cell font-mono text-sm text-slate-300">
-                      {lead.value}
-                    </TableCell>
+                    <TableCell className="hidden lg:table-cell font-mono text-sm text-slate-300">{lead.value}</TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1">
                         {lead.accountBlocked && (
