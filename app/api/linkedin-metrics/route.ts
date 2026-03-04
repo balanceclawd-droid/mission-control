@@ -229,7 +229,12 @@ function notionText(prop: any): string {
 }
 
 function notionSelect(prop: any): string {
-  return prop?.select?.name?.trim?.() ?? "";
+  if (!prop) return "";
+  if (prop?.status?.name) return String(prop.status.name).trim();
+  if (prop?.select?.name) return String(prop.select.name).trim();
+  const rich = notionText(prop);
+  if (rich) return rich;
+  return "";
 }
 
 function notionDate(prop: any): string {
@@ -242,7 +247,16 @@ function notionNumber(prop: any): number | null {
 
 function isRepliedStatus(status: string): boolean {
   const s = status.toLowerCase();
-  return s.includes("replied") || s.includes("responded") || s.includes("response") || s.includes("meeting") || s.includes("call");
+  return (
+    s.includes("replied") ||
+    s.includes("responded") ||
+    s.includes("response") ||
+    s.includes("interested") ||
+    s.includes("positive") ||
+    s.includes("meeting") ||
+    s.includes("call") ||
+    s.includes("booked")
+  );
 }
 
 function isPositiveStatus(status: string): boolean {
@@ -295,14 +309,19 @@ async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, db
     .map((p) => {
       const props = p.properties;
       const name = notionText(pickProp(props, ["Name", "Lead", "Person", "Full Name"])) || "LinkedIn Member";
-      const status = notionSelect(pickProp(props, ["Status", "Lead Status", "Pipeline Status"])) || "";
+      const status = notionSelect(pickProp(props, ["Status", "Lead Status", "Pipeline Status", "State"])) || "";
       const sentAtRaw =
-        notionDate(pickProp(props, ["Sent Date", "Date", "Created", "First Sent"])) ||
+        notionDate(pickProp(props, ["Sent Date", "Date", "Created", "First Sent", "Last Contact", "Last Contacted"])) ||
         p.created_time ||
         p.last_edited_time ||
         "";
-      const repliedAtRaw = notionDate(pickProp(props, ["Replied At", "Reply Date", "Last Reply"])) || "";
+      const repliedAtRaw = notionDate(pickProp(props, ["Replied At", "Reply Date", "Last Reply", "Response Date"])) || "";
       const hoursToReplyRaw = notionNumber(pickProp(props, ["Hours to Reply", "Reply Hours", "TTFR Hours"]));
+
+      const replyText = notionText(
+        pickProp(props, ["Their Message", "Reply", "Response", "Lead Reply", "Last Message", "Inbound Message"])
+      );
+
       const url =
         notionText(pickProp(props, ["LinkedIn URL", "Profile URL", "URL"])) ||
         pickProp(props, ["LinkedIn URL", "Profile URL", "URL"])?.url ||
@@ -317,6 +336,7 @@ async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, db
         name,
         url,
         status,
+        replyText,
         sentAt: validSentAt,
         repliedAt: validRepliedAt,
         hoursToReply: hoursToReplyRaw,
@@ -328,11 +348,11 @@ async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, db
     });
 
   const sent = leads.filter((l) => isSentLikeStatus(l.status) || !!l.sentAt).length;
-  const repliedRows = leads.filter((l) => isRepliedStatus(l.status) || !!l.repliedAt);
+  const repliedRows = leads.filter((l) => isRepliedStatus(l.status) || !!l.repliedAt || Boolean(l.replyText));
   const replied = repliedRows.length;
   const replyRate = sent > 0 ? (replied / sent) * 100 : 0;
 
-  const positive = repliedRows.filter((l) => isPositiveStatus(l.status)).length;
+  const positive = repliedRows.filter((l) => isPositiveStatus(l.status) || (l.replyText?.length ?? 0) > 80).length;
   const positiveRate = replied > 0 ? (positive / replied) * 100 : 0;
 
   const hours = repliedRows
