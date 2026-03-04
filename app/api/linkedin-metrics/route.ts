@@ -208,6 +208,179 @@ function formatHours(h: number): string {
   return `${Math.round(h / 24)}d`;
 }
 
+/* ────────────────────────── Notion metrics path ───────────────────────────── */
+
+interface NotionQueryResponse {
+  results: Array<{ id: string; properties: Record<string, any>; created_time?: string; last_edited_time?: string }>;
+  has_more?: boolean;
+  next_cursor?: string | null;
+}
+
+function pickProp(props: Record<string, any>, names: string[]): any {
+  for (const n of names) {
+    if (props[n] !== undefined) return props[n];
+  }
+  return undefined;
+}
+
+function notionText(prop: any): string {
+  const items = prop?.title ?? prop?.rich_text ?? [];
+  return items.map((x: any) => x?.plain_text ?? "").join("").trim();
+}
+
+function notionSelect(prop: any): string {
+  return prop?.select?.name?.trim?.() ?? "";
+}
+
+function notionDate(prop: any): string {
+  return prop?.date?.start ?? "";
+}
+
+function notionNumber(prop: any): number | null {
+  return typeof prop?.number === "number" ? prop.number : null;
+}
+
+function isRepliedStatus(status: string): boolean {
+  const s = status.toLowerCase();
+  return s.includes("replied") || s.includes("responded") || s.includes("response") || s.includes("meeting") || s.includes("call");
+}
+
+function isPositiveStatus(status: string): boolean {
+  const s = status.toLowerCase();
+  return s.includes("positive") || s.includes("interested") || s.includes("meeting") || s.includes("call") || s.includes("qualified");
+}
+
+function isSentLikeStatus(status: string): boolean {
+  const s = status.toLowerCase();
+  return s.includes("sent") || s.includes("contacted") || s.includes("replied") || s.includes("response") || s.includes("no response") || s.includes("meeting");
+}
+
+async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, dbId: string) {
+  const now = Date.now();
+  const cutoff = window === "7d" ? now - 7 * 86_400_000 : window === "30d" ? now - 30 * 86_400_000 : 0;
+
+  const pages: Array<{ id: string; properties: Record<string, any>; created_time?: string; last_edited_time?: string }> = [];
+  let cursor: string | null = null;
+
+  for (let i = 0; i < 10; i++) {
+    const body: any = {
+      page_size: 100,
+      ...(cursor ? { start_cursor: cursor } : {}),
+    };
+
+    const res = await fetch(`https://api.notion.com/v1/databases/${dbId}/query`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Notion query failed (${res.status}): ${txt}`);
+    }
+
+    const data = (await res.json()) as NotionQueryResponse;
+    pages.push(...data.results);
+
+    if (!data.has_more || !data.next_cursor) break;
+    cursor = data.next_cursor;
+  }
+
+  const leads = pages
+    .map((p) => {
+      const props = p.properties;
+      const name = notionText(pickProp(props, ["Name", "Lead", "Person", "Full Name"])) || "LinkedIn Member";
+      const status = notionSelect(pickProp(props, ["Status", "Lead Status", "Pipeline Status"])) || "";
+      const sentAtRaw =
+        notionDate(pickProp(props, ["Sent Date", "Date", "Created", "First Sent"])) ||
+        p.created_time ||
+        p.last_edited_time ||
+        "";
+      const repliedAtRaw = notionDate(pickProp(props, ["Replied At", "Reply Date", "Last Reply"])) || "";
+      const hoursToReplyRaw = notionNumber(pickProp(props, ["Hours to Reply", "Reply Hours", "TTFR Hours"]));
+      const url =
+        notionText(pickProp(props, ["LinkedIn URL", "Profile URL", "URL"])) ||
+        pickProp(props, ["LinkedIn URL", "Profile URL", "URL"])?.url ||
+        "";
+
+      const sentAt = sentAtRaw ? new Date(sentAtRaw) : null;
+      const repliedAt = repliedAtRaw ? new Date(repliedAtRaw) : null;
+      const validSentAt = sentAt && !Number.isNaN(sentAt.getTime()) ? sentAt : null;
+      const validRepliedAt = repliedAt && !Number.isNaN(repliedAt.getTime()) ? repliedAt : null;
+
+      return {
+        name,
+        url,
+        status,
+        sentAt: validSentAt,
+        repliedAt: validRepliedAt,
+        hoursToReply: hoursToReplyRaw,
+      };
+    })
+    .filter((l) => {
+      if (!l.sentAt) return window === "all";
+      return window === "all" ? true : l.sentAt.getTime() >= cutoff;
+    });
+
+  const sent = leads.filter((l) => isSentLikeStatus(l.status) || !!l.sentAt).length;
+  const repliedRows = leads.filter((l) => isRepliedStatus(l.status) || !!l.repliedAt);
+  const replied = repliedRows.length;
+  const replyRate = sent > 0 ? (replied / sent) * 100 : 0;
+
+  const positive = repliedRows.filter((l) => isPositiveStatus(l.status)).length;
+  const positiveRate = replied > 0 ? (positive / replied) * 100 : 0;
+
+  const hours = repliedRows
+    .map((l) => {
+      if (typeof l.hoursToReply === "number") return l.hoursToReply;
+      if (l.sentAt && l.repliedAt) return (l.repliedAt.getTime() - l.sentAt.getTime()) / 3_600_000;
+      return null;
+    })
+    .filter((x): x is number => x !== null && x >= 0);
+
+  const med = median(hours);
+  const medianReply = med !== null ? formatHours(med) : "—";
+
+  const hotReplies = repliedRows
+    .filter((l) => l.repliedAt && now - l.repliedAt.getTime() <= 72 * 3_600_000)
+    .sort((a, b) => (b.repliedAt?.getTime() ?? 0) - (a.repliedAt?.getTime() ?? 0))
+    .slice(0, 10)
+    .map((l) => ({ name: l.name, url: l.url, repliedAt: (l.repliedAt as Date).toISOString() }));
+
+  const needsFollowUp = leads
+    .filter((l) => {
+      if (!l.sentAt) return false;
+      if (isRepliedStatus(l.status) || l.repliedAt) return false;
+      const age = now - l.sentAt.getTime();
+      return age >= 3 * 86_400_000 && age <= 7 * 86_400_000;
+    })
+    .slice(0, 10)
+    .map((l) => ({ name: l.name, url: l.url }));
+
+  const unmatchedCount = leads.filter((l) => !l.name || l.name === "LinkedIn Member").length;
+
+  return {
+    isMock: false,
+    window,
+    dataSource: "notion",
+    linkedInDbConfigured: true,
+    linkedInDbId: `${dbId.slice(0, 8)}…`,
+    sent,
+    replied,
+    replyRate: Math.round(replyRate * 10) / 10,
+    positiveRate: Math.round(positiveRate * 10) / 10,
+    medianReply,
+    hotReplies,
+    needsFollowUp,
+    unmatchedCount,
+  };
+}
+
 /* ────────────────────────── Operational lists ───────────────────────────── */
 
 function buildOperationalLists(
@@ -281,32 +454,24 @@ export async function GET(req: NextRequest) {
   const window = (url.searchParams.get("window") ?? "30d") as Window;
 
   const linkedInDbId = resolveLinkedinNotionDbId();
+  const notionApiKey = process.env.NOTION_API_KEY;
   const csvPath = findCsvPath();
 
-  if (!csvPath) {
-    const m = mockMetrics(window);
-    return NextResponse.json({
-      isMock: true,
-      window,
-      dataSource: "mock",
-      linkedInDbConfigured: Boolean(linkedInDbId),
-      linkedInDbId: linkedInDbId ? `${linkedInDbId.slice(0, 8)}…` : null,
-      ...m,
-      hotReplies: [
-        { name: "Alice Wong", url: "", repliedAt: new Date(Date.now() - 3_600_000).toISOString() },
-        { name: "James Patel", url: "", repliedAt: new Date(Date.now() - 14_400_000).toISOString() },
-      ],
-      needsFollowUp: [
-        { name: "Dan Fox", url: "" },
-        { name: "Tom Nguyen", url: "" },
-        { name: "Yuki Tanaka", url: "" },
-      ],
-      unmatchedCount: 7,
-    });
+  // Path 1: Notion-first (preferred)
+  if (notionApiKey && linkedInDbId) {
+    try {
+      const notionPayload = await fetchLinkedinMetricsFromNotion(window, notionApiKey, linkedInDbId);
+      return NextResponse.json(notionPayload);
+    } catch (err) {
+      console.error("[linkedin-metrics:notion]", err);
+      // fall through to CSV fallback
+    }
   }
 
-  try {
-    const raw = fs.readFileSync(csvPath, "utf-8");
+  // Path 2: CSV fallback
+  if (csvPath) {
+    try {
+      const raw = fs.readFileSync(csvPath, "utf-8");
     const rows = parseCSV(raw);
     if (rows.length < 2) throw new Error("Empty CSV");
 
@@ -366,19 +531,29 @@ export async function GET(req: NextRequest) {
       medianReply,
       ...ops,
     });
-  } catch (err) {
-    console.error("[linkedin-metrics]", err);
-    const m = mockMetrics(window);
-    return NextResponse.json({
-      isMock: true,
-      window,
-      dataSource: "mock",
-      linkedInDbConfigured: Boolean(linkedInDbId),
-      linkedInDbId: linkedInDbId ? `${linkedInDbId.slice(0, 8)}…` : null,
-      ...m,
-      hotReplies: [],
-      needsFollowUp: [],
-      unmatchedCount: 0,
-    });
+    } catch (err) {
+      console.error("[linkedin-metrics:csv]", err);
+    }
   }
+
+  // Path 3: Mock fallback
+  const m = mockMetrics(window);
+  return NextResponse.json({
+    isMock: true,
+    window,
+    dataSource: "mock",
+    linkedInDbConfigured: Boolean(linkedInDbId),
+    linkedInDbId: linkedInDbId ? `${linkedInDbId.slice(0, 8)}…` : null,
+    ...m,
+    hotReplies: [
+      { name: "Alice Wong", url: "", repliedAt: new Date(Date.now() - 3_600_000).toISOString() },
+      { name: "James Patel", url: "", repliedAt: new Date(Date.now() - 14_400_000).toISOString() },
+    ],
+    needsFollowUp: [
+      { name: "Dan Fox", url: "" },
+      { name: "Tom Nguyen", url: "" },
+      { name: "Yuki Tanaka", url: "" },
+    ],
+    unmatchedCount: 7,
+  });
 }
