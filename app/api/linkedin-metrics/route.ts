@@ -245,6 +245,17 @@ function notionNumber(prop: any): number | null {
   return typeof prop?.number === "number" ? prop.number : null;
 }
 
+function hasMeaningfulValue(prop: any): boolean {
+  if (!prop) return false;
+  if (notionText(prop)) return true;
+  if (notionSelect(prop)) return true;
+  if (notionDate(prop)) return true;
+  if (typeof prop?.number === "number") return true;
+  if (typeof prop?.checkbox === "boolean") return true;
+  if (prop?.url) return true;
+  return false;
+}
+
 function isRepliedStatus(status: string): boolean {
   const s = status.toLowerCase();
   return (
@@ -269,7 +280,7 @@ function isSentLikeStatus(status: string): boolean {
   return s.includes("sent") || s.includes("contacted") || s.includes("replied") || s.includes("response") || s.includes("no response") || s.includes("meeting");
 }
 
-async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, dbId: string) {
+async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, dbId: string, debug = false) {
   const now = Date.now();
   const cutoff = window === "7d" ? now - 7 * 86_400_000 : window === "30d" ? now - 30 * 86_400_000 : 0;
 
@@ -303,6 +314,13 @@ async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, db
 
     if (!data.has_more || !data.next_cursor) break;
     cursor = data.next_cursor;
+  }
+
+  const propNonEmptyCounts: Record<string, number> = {};
+  for (const page of pages) {
+    for (const [k, v] of Object.entries(page.properties ?? {})) {
+      if (hasMeaningfulValue(v)) propNonEmptyCounts[k] = (propNonEmptyCounts[k] ?? 0) + 1;
+    }
   }
 
   const leads = pages
@@ -384,7 +402,7 @@ async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, db
 
   const unmatchedCount = leads.filter((l) => !l.name || l.name === "LinkedIn Member").length;
 
-  return {
+  const payload: any = {
     isMock: false,
     window,
     dataSource: "notion",
@@ -399,6 +417,20 @@ async function fetchLinkedinMetricsFromNotion(window: Window, apiKey: string, db
     needsFollowUp,
     unmatchedCount,
   };
+
+  if (debug) {
+    payload.debug = {
+      totalRowsFetched: pages.length,
+      topNonEmptyProperties: Object.entries(propNonEmptyCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 20),
+      sampleStatuses: leads.map((l) => l.status).filter(Boolean).slice(0, 20),
+      rowsWithReplyText: leads.filter((l) => Boolean(l.replyText)).length,
+      rowsWithReplyDate: leads.filter((l) => Boolean(l.repliedAt)).length,
+    };
+  }
+
+  return payload;
 }
 
 /* ────────────────────────── Operational lists ───────────────────────────── */
@@ -476,11 +508,12 @@ export async function GET(req: NextRequest) {
   const linkedInDbId = resolveLinkedinNotionDbId();
   const notionApiKey = process.env.NOTION_API_KEY;
   const csvPath = findCsvPath();
+  const debug = url.searchParams.get("debug") === "1";
 
   // Path 1: Notion-first (preferred)
   if (notionApiKey && linkedInDbId) {
     try {
-      const notionPayload = await fetchLinkedinMetricsFromNotion(window, notionApiKey, linkedInDbId);
+      const notionPayload = await fetchLinkedinMetricsFromNotion(window, notionApiKey, linkedInDbId, debug);
       return NextResponse.json(notionPayload);
     } catch (err) {
       console.error("[linkedin-metrics:notion]", err);
