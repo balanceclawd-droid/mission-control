@@ -215,6 +215,23 @@ function getLatestMessagesCsvPath(): string | null {
   return files[0] ? path.join(dir, files[0].f) : null;
 }
 
+async function loadCsvText(reqUrl: URL): Promise<{ text: string | null; source: string }> {
+  // Priority: explicit URL in query -> env URL -> local latest file
+  const queryUrl = reqUrl.searchParams.get("csvUrl");
+  const envUrl = process.env.LINKEDIN_MESSAGES_CSV_URL;
+  const remoteUrl = queryUrl || envUrl;
+
+  if (remoteUrl) {
+    const res = await fetch(remoteUrl, { cache: "no-store" });
+    if (!res.ok) throw new Error(`CSV fetch failed (${res.status})`);
+    return { text: await res.text(), source: queryUrl ? "csv-url-query" : "csv-url-env" };
+  }
+
+  const csvPath = getLatestMessagesCsvPath();
+  if (!csvPath) return { text: null, source: "none" };
+  return { text: fs.readFileSync(csvPath, "utf8"), source: "csv-local" };
+}
+
 function parseDate(v: string): Date | null {
   if (!v) return null;
   const d = new Date(v);
@@ -302,15 +319,38 @@ export async function GET(req: NextRequest) {
   const dbId = resolveLinkedinNotionDbId();
   const apiKey = process.env.NOTION_API_KEY;
 
-  const csvPath = getLatestMessagesCsvPath();
-  if (!csvPath) {
+  let csvLoad: { text: string | null; source: string };
+  try {
+    csvLoad = await loadCsvText(url);
+  } catch (e) {
     return NextResponse.json({
       isMock: true,
       window,
       dataSource: "mock",
       linkedInDbConfigured: Boolean(dbId),
       linkedInDbId: dbId ? `${dbId.slice(0, 8)}…` : null,
-      error: "No messages CSV found",
+      error: e instanceof Error ? e.message : "CSV load failed",
+      sent: 0,
+      replied: 0,
+      replyRate: 0,
+      positiveRate: 0,
+      medianReply: "—",
+      drafted: 0,
+      hotReplies: [],
+      needsFollowUp: [],
+      unmatchedProfiles: [],
+      unmatchedCount: 0,
+    });
+  }
+
+  if (!csvLoad.text) {
+    return NextResponse.json({
+      isMock: true,
+      window,
+      dataSource: "mock",
+      linkedInDbConfigured: Boolean(dbId),
+      linkedInDbId: dbId ? `${dbId.slice(0, 8)}…` : null,
+      error: "No messages CSV found (set LINKEDIN_MESSAGES_CSV_URL in Vercel or pass ?csvUrl=...)",
       sent: 0,
       replied: 0,
       replyRate: 0,
@@ -325,7 +365,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const csvText = fs.readFileSync(csvPath, "utf8");
+    const csvText = csvLoad.text;
     const events = parseCsvEvents(csvText).filter((e) => inWindow(e.sentAt, window));
 
     const notionMeta = apiKey && dbId ? await fetchLinkedinNotionMeta(apiKey, dbId) : new Map<string, LeadMeta>();
@@ -400,6 +440,7 @@ export async function GET(req: NextRequest) {
       isMock: false,
       window,
       dataSource: "csv+notion",
+      csvSource: csvLoad.source,
       linkedInDbConfigured: Boolean(dbId),
       linkedInDbId: dbId ? `${dbId.slice(0, 8)}…` : null,
       sent,
