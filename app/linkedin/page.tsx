@@ -6,12 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { StatCard } from "@/components/ui/StatCard";
 import { Table, TableHead, TableHeader, TableBody, TableRow, TableCell } from "@/components/ui/Table";
-import {
-  linkedInProfiles,
-  templateStats,
-  getLinkedInMetrics,
-  type LinkedInSegment,
-} from "@/lib/mock/phase1-linkedin";
+type LinkedInSegment = "all";
 
 /* ─────────────────────── Types ─────────────────────────────── */
 
@@ -27,15 +22,14 @@ interface KpiData {
   hotReplies: { name: string; url: string; repliedAt: string }[];
   needsFollowUp: { name: string; url: string }[];
   unmatchedCount: number;
+  profiles?: Array<any>;
+  templates?: Array<any>;
 }
 
 /* ─────────────────────── Static config ─────────────────────── */
 
 const segments: Array<{ value: LinkedInSegment; label: string }> = [
   { value: "all", label: "All" },
-  { value: "infra", label: "Infra" },
-  { value: "exchange", label: "Exchange" },
-  { value: "founders", label: "Founders" },
 ];
 
 const timeWindows: Array<{ value: TimeWindow; label: string }> = [
@@ -101,19 +95,27 @@ export default function LinkedInPage() {
       .catch(() => setKpiLoading(false));
   }, [timeWindow]);
 
-  const metrics = useMemo(() => getLinkedInMetrics(linkedInProfiles, segment), [segment]);
-
   const filteredProfiles = useMemo(
-    () => (segment === "all" ? linkedInProfiles : linkedInProfiles.filter((p) => p.segment === segment)),
-    [segment]
+    () => (kpi?.profiles ?? []),
+    [kpi]
   );
 
   const filteredTemplates = useMemo(
-    () => (segment === "all" ? templateStats : templateStats.filter((t) => t.segment === segment)),
-    [segment]
+    () => (kpi?.templates ?? []),
+    [kpi]
   );
 
   const topTemplates = [...filteredTemplates].sort((a, b) => b.replyRate - a.replyRate);
+
+  const metrics = useMemo(() => {
+    const total = filteredProfiles.length;
+    const processed = filteredProfiles.filter((p) => p.status === "processed").length;
+    const drafted = filteredProfiles.filter((p) => p.status === "drafted").length;
+    const sentCount = filteredProfiles.filter((p) => p.status === "sent").length;
+    const repliedCount = filteredProfiles.filter((p) => p.status === "replied").length;
+    const noResponse = 0;
+    return { total, processed, drafted, sent: sentCount, replied: repliedCount, noResponse };
+  }, [filteredProfiles]);
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-7xl mx-auto">
@@ -285,7 +287,7 @@ export default function LinkedInPage() {
             {s.label}
           </button>
         ))}
-        <span className="text-xs text-slate-600 ml-2">(pipeline demo data)</span>
+        <span className="text-xs text-slate-600 ml-2">(live pipeline data)</span>
       </div>
 
       {/* ── Segment metrics row ── */}

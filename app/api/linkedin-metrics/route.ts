@@ -26,6 +26,7 @@ interface LeadMeta {
   variantId?: string;
   persona?: string;
   role?: string;
+  company?: string;
   fitScore?: number | null;
   drafted?: boolean;
 }
@@ -202,6 +203,7 @@ async function fetchLinkedinNotionMeta(apiKey: string, dbId: string): Promise<Ma
       variantId: getText(pick(props, ["Variant ID", "variant_id", "Variant"])),
       persona: getSelect(pick(props, ["Persona"])) || getText(pick(props, ["Persona"])),
       role: getText(pick(props, ["Role", "Job Title"])),
+      company: getText(pick(props, ["Company", "Organisation", "Organization"])),
       fitScore: getNumber(pick(props, ["Fit Score", "Score"])),
       drafted: Boolean(getText(pick(props, ["DM Draft", "Follow-up Draft"]))),
     });
@@ -465,6 +467,39 @@ export async function GET(req: NextRequest) {
     const byRoleBucket = breakdown((e) => bucketRole(notionMeta.get(e.profileUrl)?.role));
     const byFitScoreBand = breakdown((e) => fitBand(notionMeta.get(e.profileUrl)?.fitScore));
 
+    const byProfile = new Map<string, { sentAt: Date; inboundAt?: Date | null }>();
+    for (const e of events) {
+      const prev = byProfile.get(e.profileUrl);
+      if (!prev || e.sentAt < prev.sentAt) byProfile.set(e.profileUrl, { sentAt: e.sentAt, inboundAt: e.inboundAt });
+      else if (!prev.inboundAt && e.inboundAt) prev.inboundAt = e.inboundAt;
+    }
+
+    const profiles = Array.from(byProfile.entries()).map(([url, p], idx) => {
+      const meta = notionMeta.get(url);
+      const hasReply = Boolean(p.inboundAt && p.inboundAt.getTime() > p.sentAt.getTime());
+      const status = hasReply ? "replied" : (meta?.drafted ? "drafted" : "sent");
+      return {
+        id: `${idx + 1}`,
+        name: meta?.name || url,
+        company: meta?.company || "Unknown",
+        role: meta?.role || "Unknown",
+        segment: "all",
+        status,
+        templateUsed: meta?.variantId || "unknown",
+        processedAt: p.sentAt.toISOString().slice(0, 10),
+        draftReady: Boolean(meta?.drafted),
+      };
+    });
+
+    const templates = byVariant.map((v, idx) => ({
+      id: `${idx + 1}`,
+      name: v.key,
+      segment: "all",
+      replies: v.replied,
+      sent: v.sent,
+      replyRate: v.replyRate,
+    }));
+
     return NextResponse.json({
       isMock: false,
       window,
@@ -493,6 +528,8 @@ export async function GET(req: NextRequest) {
         byRoleBucket,
         byFitScoreBand,
       },
+      profiles,
+      templates,
       hotReplies,
       needsFollowUp,
       unmatchedProfiles,
