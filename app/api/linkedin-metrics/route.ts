@@ -39,6 +39,14 @@ interface CsvEvent {
   replyClass?: ReplyClass;
 }
 
+interface CsvMessageRow {
+  conversationId: string;
+  senderUrl: string;
+  recipientUrl: string;
+  date: Date;
+  content: string;
+}
+
 function resolveLinkedinNotionDbId(): string | null {
   return process.env.NOTION_DATABASE_ID_LINKEDIN ?? process.env.NOTION_DATABASE_ID ?? null;
 }
@@ -245,49 +253,68 @@ function parseCsvEvents(csvText: string): CsvEvent[] {
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const idx = (names: string[]) => names.map((n) => header.indexOf(n)).find((i) => i >= 0) ?? -1;
 
-  const iProfile = idx(["linkedin_profile_url", "recipient profile urls", "recipient_profile_url", "sender profile url"]);
-  const iSent = idx(["sent_date", "date"]);
-  const iInbound = idx(["last_inbound_date"]);
-  const iDirection = idx(["message_direction", "folder"]);
-  const iOutboundSnippet = idx(["outbound_message_snippet", "content"]);
-  const iInboundSnippet = idx(["inbound_message_snippet"]);
-  const iSenderUrl = idx(["sender profile url"]);
+  const iConversationId = idx(["conversation id", "conversation_id"]);
+  const iDate = idx(["date", "sent_date"]);
+  const iSenderUrl = idx(["sender profile url", "sender_profile_url"]);
   const iRecipientUrl = idx(["recipient profile urls", "recipient_profile_url"]);
+  const iContent = idx(["content", "outbound_message_snippet", "inbound_message_snippet"]);
 
-  const out: CsvEvent[] = [];
+  const ryanUrl = normalizeLinkedinUrl("https://www.linkedin.com/in/ryan-godson-1669a8211");
 
+  const messages: CsvMessageRow[] = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
-    const direction = (iDirection >= 0 ? (r[iDirection] ?? "") : "").toLowerCase();
-    const sentAt = parseDate(iSent >= 0 ? r[iSent] ?? "" : "");
-    if (!sentAt) continue;
+    const date = parseDate(iDate >= 0 ? r[iDate] ?? "" : "");
+    if (!date) continue;
 
-    const explicitProfile = iProfile >= 0 ? normalizeLinkedinUrl(r[iProfile] ?? "") : "";
-    const sender = iSenderUrl >= 0 ? normalizeLinkedinUrl(r[iSenderUrl] ?? "") : "";
-    const recipient = iRecipientUrl >= 0 ? normalizeLinkedinUrl(r[iRecipientUrl] ?? "") : "";
+    const senderUrl = normalizeLinkedinUrl(iSenderUrl >= 0 ? r[iSenderUrl] ?? "" : "");
+    const recipientUrl = normalizeLinkedinUrl(iRecipientUrl >= 0 ? r[iRecipientUrl] ?? "" : "");
+    const conversationId = iConversationId >= 0 ? (r[iConversationId] ?? "").trim() : "";
+    const content = iContent >= 0 ? (r[iContent] ?? "") : "";
 
-    let profileUrl = explicitProfile;
-    if (!profileUrl) {
-      if (direction.includes("sent") || direction.includes("outbound")) profileUrl = recipient || sender;
-      else profileUrl = sender || recipient;
-    }
+    if (!senderUrl && !recipientUrl) continue;
+
+    messages.push({ conversationId, senderUrl, recipientUrl, date, content });
+  }
+
+  const byConv = new Map<string, CsvMessageRow[]>();
+  for (const m of messages) {
+    const key = m.conversationId || `${m.senderUrl}|${m.recipientUrl}`;
+    if (!byConv.has(key)) byConv.set(key, []);
+    byConv.get(key)!.push(m);
+  }
+
+  const events: CsvEvent[] = [];
+
+  for (const [, conv] of byConv) {
+    conv.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+    const outbound = conv.filter((m) => m.senderUrl === ryanUrl);
+    if (!outbound.length) continue;
+
+    const firstOutbound = outbound[0];
+    const profileUrl = firstOutbound.recipientUrl && firstOutbound.recipientUrl !== ryanUrl
+      ? firstOutbound.recipientUrl
+      : (firstOutbound.senderUrl !== ryanUrl ? firstOutbound.senderUrl : "");
     if (!profileUrl) continue;
 
-    const inboundAt = parseDate(iInbound >= 0 ? r[iInbound] ?? "" : "");
-    const outboundSnippet = iOutboundSnippet >= 0 ? r[iOutboundSnippet] ?? "" : "";
-    const inboundSnippet = iInboundSnippet >= 0 ? r[iInboundSnippet] ?? "" : "";
+    const inboundAfter = conv.filter(
+      (m) => m.senderUrl !== ryanUrl && m.date.getTime() > firstOutbound.date.getTime()
+    );
 
-    out.push({
+    const firstInbound = inboundAfter[0];
+
+    events.push({
       profileUrl,
-      sentAt,
-      inboundAt,
-      outboundSnippet,
-      inboundSnippet,
-      replyClass: classifyReply(inboundSnippet),
+      sentAt: firstOutbound.date,
+      inboundAt: firstInbound?.date ?? null,
+      outboundSnippet: firstOutbound.content,
+      inboundSnippet: firstInbound?.content ?? "",
+      replyClass: classifyReply(firstInbound?.content ?? ""),
     });
   }
 
-  return out;
+  return events;
 }
 
 function inWindow(d: Date, w: Window): boolean {
@@ -408,7 +435,9 @@ export async function GET(req: NextRequest) {
         owner: notionMeta.get(e.profileUrl)?.owner ?? null,
       }));
 
+    const ryanUrl = normalizeLinkedinUrl("https://www.linkedin.com/in/ryan-godson-1669a8211");
     const unmatchedProfiles = Array.from(new Set(events.map((e) => e.profileUrl)))
+      .filter((u) => u !== ryanUrl)
       .filter((u) => !notionMeta.has(u))
       .slice(0, 100);
 
