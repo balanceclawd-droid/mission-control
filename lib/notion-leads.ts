@@ -99,7 +99,11 @@ function loadCreds(): { notion?: { api_key?: string; database_id?: string } } {
 
 function resolveNotionAuth(): { apiKey: string; dbId: string } {
   const envApiKey = process.env.NOTION_API_KEY;
-  const envDbId = process.env.NOTION_DATABASE_ID;
+
+  // Preferred explicit env var for this page, with backwards-compatible fallback.
+  const envDbIdEnreach = process.env.NOTION_DATABASE_ID_ENREACH;
+  const envDbIdLegacy = process.env.NOTION_DATABASE_ID;
+  const envDbId = envDbIdEnreach || envDbIdLegacy;
 
   if (envApiKey && envDbId) {
     return { apiKey: envApiKey, dbId: envDbId };
@@ -113,7 +117,7 @@ function resolveNotionAuth(): { apiKey: string; dbId: string } {
   }
 
   throw new Error(
-    "Missing Notion credentials. Set NOTION_API_KEY + NOTION_DATABASE_ID (recommended for Vercel), or provide ~/.openclaw/credentials/enreach-lead-capture.json"
+    "Missing Notion credentials. Set NOTION_API_KEY + (NOTION_DATABASE_ID_ENREACH or NOTION_DATABASE_ID), or provide ~/.openclaw/credentials/enreach-lead-capture.json"
   );
 }
 

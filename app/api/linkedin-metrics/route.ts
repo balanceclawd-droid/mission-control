@@ -5,6 +5,11 @@ import os from "os";
 
 const RYAN_URL = "https://www.linkedin.com/in/ryan-godson-1669a8211";
 
+function resolveLinkedinNotionDbId(): string | null {
+  // Explicit LinkedIn DB var first, then legacy fallback.
+  return process.env.NOTION_DATABASE_ID_LINKEDIN ?? process.env.NOTION_DATABASE_ID ?? null;
+}
+
 /* ────────────────────────────── CSV parser ────────────────────────────── */
 
 function parseCSV(text: string): string[][] {
@@ -275,6 +280,7 @@ export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const window = (url.searchParams.get("window") ?? "30d") as Window;
 
+  const linkedInDbId = resolveLinkedinNotionDbId();
   const csvPath = findCsvPath();
 
   if (!csvPath) {
@@ -282,6 +288,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       isMock: true,
       window,
+      dataSource: "mock",
+      linkedInDbConfigured: Boolean(linkedInDbId),
+      linkedInDbId: linkedInDbId ? `${linkedInDbId.slice(0, 8)}…` : null,
       ...m,
       hotReplies: [
         { name: "Alice Wong", url: "", repliedAt: new Date(Date.now() - 3_600_000).toISOString() },
@@ -347,6 +356,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       isMock: false,
       window,
+      dataSource: "csv",
+      linkedInDbConfigured: Boolean(linkedInDbId),
+      linkedInDbId: linkedInDbId ? `${linkedInDbId.slice(0, 8)}…` : null,
       sent: sentLeads,
       replied: repliedLeads,
       replyRate: Math.round(replyRate * 10) / 10,
@@ -357,6 +369,16 @@ export async function GET(req: NextRequest) {
   } catch (err) {
     console.error("[linkedin-metrics]", err);
     const m = mockMetrics(window);
-    return NextResponse.json({ isMock: true, window, ...m, hotReplies: [], needsFollowUp: [], unmatchedCount: 0 });
+    return NextResponse.json({
+      isMock: true,
+      window,
+      dataSource: "mock",
+      linkedInDbConfigured: Boolean(linkedInDbId),
+      linkedInDbId: linkedInDbId ? `${linkedInDbId.slice(0, 8)}…` : null,
+      ...m,
+      hotReplies: [],
+      needsFollowUp: [],
+      unmatchedCount: 0,
+    });
   }
 }
